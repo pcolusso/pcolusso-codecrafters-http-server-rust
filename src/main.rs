@@ -72,9 +72,13 @@ fn handle_request(mut stream: TcpStream) -> Result<()> {
 
     eprintln!("Handing {verb} to {:?}", path);
 
-    let response = match (verb, path.as_str()) {
-        (Verb::Get, "/") => "HTTP/1.1 200 OK\r\n\r\n200 OK",
-        _ => "HTTP/1.1 404 Not Found\r\n\r\n404 Not Found"
+    let response = if path.starts_with("/echo/") {
+        let to_echo = path.strip_prefix("/echo/").unwrap();
+        format!("HTTP/1.1 200 OK\r\n\r\n{to_echo}")
+    } else if path == "/" {
+        "HTTP/1.1 200 OK\r\n\r\n200 OK".to_string()
+    } else {
+        "HTTP/1.1 404 Not Found\r\n\r\n404 Not Found".to_string()
     };
 
     stream.write_all(response.as_bytes())?;
