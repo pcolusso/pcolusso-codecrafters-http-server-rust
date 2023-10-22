@@ -60,20 +60,71 @@ impl TryFrom<&str> for StartLine {
     }
 }
 
+#[derive(Debug)]
+struct Header {
+    key: String,
+    value: String
+}
+
+impl TryFrom<&str> for Header {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
+        let components: Vec<&str>  = value.splitn(2, ':').collect();
+
+        if components.len() != 2 {
+            return Err(anyhow::anyhow!("Header missing key or value"));
+        }
+
+        let key = components[0].trim().to_string();
+        let value = components[1].trim().to_string();
+        
+        Ok(Header { key, value })
+    }
+}
+
+impl Header {
+    fn is_header(line: &str) -> bool {
+        let components: Vec<&str>  = line.splitn(2, ':').collect();
+
+        components.len() == 2 
+    }
+}
+
 fn handle_request(mut stream: TcpStream) -> Result<()> {
     let mut reader = BufReader::new(&mut stream);
-    let mut start_line = String::with_capacity(20); 
-    reader.read_line(&mut start_line)?;
+    let mut buf = String::with_capacity(50); 
+    reader.read_line(&mut buf)?;
 
-    let start_line = StartLine::try_from(start_line.as_str())?;
+    let start_line = StartLine::try_from(buf.as_str())?;
+    buf.clear();
 
     let StartLine { path, verb } = start_line;
 
     eprintln!("Handing {verb} to {:?}", path);
 
+    let mut headers: Vec<Header> = vec!();
+
+    loop {
+        let _ = reader.read_line(&mut buf)?;
+        eprintln!("Reading Headers, line is {:?}", buf);
+
+        if Header::is_header(&buf) {
+            headers.push(Header::try_from(buf.as_str())?);
+        } else {
+            break;
+        }
+        buf.clear();
+    }
+
+    eprintln!("Headers: {:?}", headers);
+
     let response = if path.starts_with("/echo/") {
         let to_echo = path.strip_prefix("/echo/").unwrap();
         format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {0}\r\n\r\n{to_echo}", to_echo.len())
+    } else if path == "/user-agent" {
+        let user_agent = headers.iter().find(|h| h.key == "User-Agent").unwrap().value.clone();
+        format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {0}\r\n\r\n{1}", user_agent.len(), user_agent)
     } else if path == "/" {
         "HTTP/1.1 200 OK\r\n\r\n200 OK".to_string()
     } else {
