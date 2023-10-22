@@ -1,5 +1,8 @@
+use std::cell::RefCell;
 use std::fmt::Display;
 use std::io::BufReader;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread;
 use std::{net::TcpListener, io::Write};
 use std::net::TcpStream;
@@ -92,7 +95,7 @@ impl Header {
     }
 }
 
-fn handle_request(mut stream: TcpStream) -> Result<()> {
+fn handle_request(mut stream: TcpStream, opts: Args) -> Result<()> {
     let mut reader = BufReader::new(&mut stream);
     let mut buf = String::with_capacity(50); 
     reader.read_line(&mut buf)?;
@@ -121,8 +124,19 @@ fn handle_request(mut stream: TcpStream) -> Result<()> {
     eprintln!("Headers: {:?}", headers);
 
     let response = if path.starts_with("/echo/") {
-        let to_echo = path.strip_prefix("/echo/").unwrap();
+        let to_echo = path.strip_prefix("/echo/").unwrap(); // We just tested above
         format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {0}\r\n\r\n{to_echo}", to_echo.len())
+    } else if opts.directory.is_some() && path.starts_with("/files/") {
+        let file_name = path.strip_prefix("/files/").unwrap();
+        let file_path = opts.directory.unwrap().join(file_name);
+        match std::fs::metadata(&file_path) {
+            Ok(_) => {
+                let contents = std::fs::read_to_string(file_path)?;
+                format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {0}\r\n\r\n{1}", contents.len(), contents)
+            },
+            Err(_) => "HTTP/1.1 404 Not Found\r\n\r\n404 Not Found".to_string()
+        }
+
     } else if path == "/user-agent" {
         let user_agent = headers.iter().find(|h| h.key == "User-Agent").unwrap().value.clone();
         format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {0}\r\n\r\n{1}", user_agent.len(), user_agent)
@@ -138,9 +152,36 @@ fn handle_request(mut stream: TcpStream) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone)]
+struct Args {
+    directory: Option<PathBuf>
+}
+
+impl Args {
+    fn new() -> Args {
+        let mut args = Args { directory: None };
+        
+        let mut args_iter = std::env::args().skip(1);
+
+        while let Some(arg) = args_iter.next() {
+            match arg.as_str() {
+                "--directory" => {
+                    let path = args_iter.next().map(PathBuf::from);
+                    args.directory = path;
+                },
+                _ => { }
+            }
+        }
+        
+        args
+    }
+}
+
 fn main() -> Result<()> {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     println!("Logs from your program will appear here!");
+
+    let args = Args::new();
 
     // Uncomment this block to pass the first stage
     let listener = TcpListener::bind("127.0.0.1:4221")?;
@@ -148,8 +189,9 @@ fn main() -> Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                let im_being_lazy = args.clone();
                 thread::spawn(move || {
-                    match handle_request(stream) {
+                    match handle_request(stream, im_being_lazy) {
                         Ok(()) => { },
                         Err(e) => { eprintln!("Issue processing connection, {0}", e); } 
                     }
