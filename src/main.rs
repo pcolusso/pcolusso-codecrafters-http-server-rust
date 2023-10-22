@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::fmt::Display;
+use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,13 +12,15 @@ use std::io::prelude::*;
 use anyhow::{anyhow, Result};
 
 enum Verb {
-    Get
+    Get,
+    Post
 }
 
 impl Display for Verb {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Verb::Get => write!(f, "GET")?,
+            Verb::Post => write!(f, "POST")?
         }
 
         Ok(())
@@ -30,6 +33,7 @@ impl TryFrom<&str> for Verb {
     fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
         match value {
             "GET" => Ok(Verb::Get),
+            "POST" => Ok(Verb::Post),
             _ => Err(anyhow!("Unknown verb {value}"))
         }
     }
@@ -86,6 +90,20 @@ impl TryFrom<&str> for Header {
         Ok(Header { key, value })
     }
 }
+struct Headers(Vec<Header>);
+
+impl Headers {
+    fn get(&self, key: &str) -> Option<String> {
+        match self.0.iter().find(|h| h.key == key) {
+            Some(h) => { Some(h.value.clone()) },
+            None => None
+        }
+    }
+
+    fn add(&mut self, h: Header) {
+        self.0.push(h);
+    }
+}
 
 impl Header {
     fn is_header(line: &str) -> bool {
@@ -93,6 +111,13 @@ impl Header {
 
         components.len() == 2 
     }
+}
+
+fn save_file(path: PathBuf, contents: &[u8]) -> Result<usize> {
+    let mut file = File::create("foo.txt")?;
+    file.write_all(contents);
+
+    Ok(contents.len())
 }
 
 fn handle_request(mut stream: TcpStream, opts: Args) -> Result<()> {
@@ -107,25 +132,33 @@ fn handle_request(mut stream: TcpStream, opts: Args) -> Result<()> {
 
     eprintln!("Handing {verb} to {:?}", path);
 
-    let mut headers: Vec<Header> = vec!();
+    let mut headers = Headers(vec!());
 
     loop {
         let _ = reader.read_line(&mut buf)?;
         eprintln!("Reading Headers, line is {:?}", buf);
 
         if Header::is_header(&buf) {
-            headers.push(Header::try_from(buf.as_str())?);
+            headers.add(Header::try_from(buf.as_str())?);
         } else {
             break;
         }
         buf.clear();
     }
-
-    eprintln!("Headers: {:?}", headers);
-
+    // Ideally, a pattern match would be better here. But not too sure how to achieve that with partial strings
     let response = if path.starts_with("/echo/") {
         let to_echo = path.strip_prefix("/echo/").unwrap(); // We just tested above
         format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {0}\r\n\r\n{to_echo}", to_echo.len())
+    } else if matches!(verb, Verb::Post) && opts.directory.is_some() && path.starts_with("/files/") {
+        let file_name = path.strip_prefix("/files/").unwrap();
+        let file_path = opts.directory.unwrap().join(file_name);
+        let mut file = File::create(file_path)?;
+        let content_length = headers.get("Content-Length").unwrap();
+        let size: usize = content_length.parse()?;
+        let mut body = vec![0; size];
+        reader.read_exact(&mut body)?;
+        file.write_all(&body)?;
+        "HTTP/1.1 201 Created\r\n\r\n201 Created".to_string()
     } else if opts.directory.is_some() && path.starts_with("/files/") {
         let file_name = path.strip_prefix("/files/").unwrap();
         let file_path = opts.directory.unwrap().join(file_name);
@@ -136,9 +169,8 @@ fn handle_request(mut stream: TcpStream, opts: Args) -> Result<()> {
             },
             Err(_) => "HTTP/1.1 404 Not Found\r\n\r\n404 Not Found".to_string()
         }
-
     } else if path == "/user-agent" {
-        let user_agent = headers.iter().find(|h| h.key == "User-Agent").unwrap().value.clone();
+        let user_agent = headers.get("User-Agent").unwrap();
         format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {0}\r\n\r\n{1}", user_agent.len(), user_agent)
     } else if path == "/" {
         "HTTP/1.1 200 OK\r\n\r\n200 OK".to_string()
