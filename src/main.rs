@@ -1,6 +1,5 @@
 use std::fmt::Display;
-use std::io::{Read, BufReader};
-// Uncomment this block to pass the first stage
+use std::io::BufReader;
 use std::{net::TcpListener, io::Write};
 use std::net::TcpStream;
 use std::io::prelude::*;
@@ -74,7 +73,7 @@ fn handle_request(mut stream: TcpStream) -> Result<()> {
 
     let response = if path.starts_with("/echo/") {
         let to_echo = path.strip_prefix("/echo/").unwrap();
-        format!("HTTP/1.1 200 OK\r\n\r\n{to_echo}")
+        format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {0}\r\n\r\n{to_echo}", to_echo.len())
     } else if path == "/" {
         "HTTP/1.1 200 OK\r\n\r\n200 OK".to_string()
     } else {
