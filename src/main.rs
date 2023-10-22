@@ -1,5 +1,6 @@
 use std::fmt::Display;
 use std::io::BufReader;
+use std::thread;
 use std::{net::TcpListener, io::Write};
 use std::net::TcpStream;
 use std::io::prelude::*;
@@ -147,12 +148,12 @@ fn main() -> Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                println!("accepted new connection");
-                
-                match handle_request(stream) {
-                    Ok(()) => { },
-                    Err(e) => { eprintln!("Issue processing connection, {0}", e); } 
-                }
+                thread::spawn(move || {
+                    match handle_request(stream) {
+                        Ok(()) => { },
+                        Err(e) => { eprintln!("Issue processing connection, {0}", e); } 
+                    }
+                });
             }
             Err(e) => {
                 println!("error: {}", e);
