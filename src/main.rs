@@ -6,7 +6,10 @@ use std::thread;
 use std::{net::TcpListener, io::Write};
 use std::net::TcpStream;
 use std::io::prelude::*;
+
 use anyhow::{anyhow, Result};
+use clap::Parser;
+use once_cell::sync::OnceCell;
 
 enum Verb {
     Get,
@@ -91,10 +94,7 @@ struct Headers(Vec<Header>);
 
 impl Headers {
     fn get(&self, key: &str) -> Option<String> {
-        match self.0.iter().find(|h| h.key == key) {
-            Some(h) => { Some(h.value.clone()) },
-            None => None
-        }
+        self.0.iter().find(|h| h.key == key).map(|h| h.value.clone())
     }
 
     fn add(&mut self, h: Header) {
@@ -108,13 +108,6 @@ impl Header {
 
         components.len() == 2 
     }
-}
-
-fn save_file(path: PathBuf, contents: &[u8]) -> Result<usize> {
-    let mut file = File::create("foo.txt")?;
-    file.write_all(contents);
-
-    Ok(contents.len())
 }
 
 struct Body(Vec<u8>);
@@ -158,9 +151,10 @@ fn read_stream(stream: &mut TcpStream) -> Result<Request> {
     Ok(Request(start_line, headers, body))
 }
 
-fn handle_request(mut stream: &mut TcpStream, opts: Args) -> Result<String> {
-    let Request ( start_line, headers, body ) = read_stream(&mut stream)?;
+fn handle_request(stream: &mut TcpStream) -> Result<String> {
+    let Request ( start_line, headers, body ) = read_stream(stream)?;
     let StartLine { verb, path } = start_line;
+    let opts = Args::global();
 
     let response = match (verb, path.as_str(), body) {
         (Verb::Get, p, _) if p.starts_with("/echo/") => {
@@ -169,16 +163,14 @@ fn handle_request(mut stream: &mut TcpStream, opts: Args) -> Result<String> {
         },
         (Verb::Post, p, Some(b)) if p.starts_with("/files/") => {
             let file_name = path.strip_prefix("/files/").unwrap();
-            let file_path = opts.directory.unwrap().join(file_name);
+            let file_path = opts.directory.clone().unwrap().join(file_name);
             let mut file = File::create(file_path)?;
-            let content_length = headers.get("Content-Length").unwrap();
-            let size: usize = content_length.parse()?;
             file.write_all(&b.0)?;
             "HTTP/1.1 201 Created\r\n\r\n201 Created".to_string()
         },
         (Verb::Get, p, _) if opts.directory.is_some() && p.starts_with("/files/")  => {
             let file_name = path.strip_prefix("/files/").unwrap();
-            let file_path = opts.directory.unwrap().join(file_name);
+            let file_path = opts.directory.clone().unwrap().join(file_name);
             match std::fs::metadata(&file_path) {
                 Ok(_) => {
                     let contents = std::fs::read_to_string(file_path)?;
@@ -198,36 +190,30 @@ fn handle_request(mut stream: &mut TcpStream, opts: Args) -> Result<String> {
     Ok(response)
 }
 
-#[derive(Clone)]
+#[derive(Parser, Debug)]
 struct Args {
+    #[arg(short, long)]
     directory: Option<PathBuf>
 }
 
-impl Args {
-    fn new() -> Args {
-        let mut args = Args { directory: None };
-        
-        let mut args_iter = std::env::args().skip(1);
+static OPTS: OnceCell<Args> = OnceCell::new();
 
-        while let Some(arg) = args_iter.next() {
-            match arg.as_str() {
-                "--directory" => {
-                    let path = args_iter.next().map(PathBuf::from);
-                    args.directory = path;
-                },
-                _ => { }
-            }
-        }
-        
-        args
+impl Args {
+    pub fn global() -> &'static Args {
+        OPTS.get().expect("logger is not initialized")
     }
 }
+
 
 fn main() -> Result<()> {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     println!("Logs from your program will appear here!");
 
-    let args = Args::new();
+    {
+        let args = Args::parse();
+        OPTS.set(args).unwrap();
+    }
+
 
     // Uncomment this block to pass the first stage
     let listener = TcpListener::bind("127.0.0.1:4221")?;
@@ -235,14 +221,13 @@ fn main() -> Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                let im_being_lazy = args.clone();
                 thread::spawn(move || {
-                    match handle_request(&mut stream, im_being_lazy) {
+                    match handle_request(&mut stream) {
                         Ok(response) => { 
                             stream.write_all(response.as_bytes()).unwrap();
                         },
                         Err(e) => { 
-                            stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\n\r\n500 Internal Server Error");
+                            stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\n\r\n500 Internal Server Error").unwrap();
                             eprintln!("Issue processing connection, {0}", e);
                         } 
                     }
