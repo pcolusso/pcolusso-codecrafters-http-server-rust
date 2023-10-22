@@ -1,4 +1,3 @@
-use std::fmt::Display;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -10,33 +9,14 @@ use std::io::prelude::*;
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use once_cell::sync::OnceCell;
+use strum_macros::{EnumString, Display};
 
+#[derive(Debug, EnumString, Display)]
 enum Verb {
+    #[strum(serialize = "GET")]
     Get,
+    #[strum(serialize = "POST")]
     Post
-}
-
-impl Display for Verb {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Verb::Get => write!(f, "GET")?,
-            Verb::Post => write!(f, "POST")?
-        }
-
-        Ok(())
-    }
-}
-
-impl TryFrom<&str> for Verb {
-    type Error = anyhow::Error;
-
-    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
-        match value {
-            "GET" => Ok(Verb::Get),
-            "POST" => Ok(Verb::Post),
-            _ => Err(anyhow!("Unknown verb {value}"))
-        }
-    }
 }
 
 struct StartLine {
@@ -51,14 +31,14 @@ impl TryFrom<&str> for StartLine {
         let stripped = value.strip_suffix("HTTP/1.1\r\n");
 
         if stripped.is_none() {
-            return Err(anyhow::anyhow!("Start line does not end with HTTP/1.1, it was '{:?}'", value));
+            return Err(anyhow!("Start line does not end with HTTP/1.1, it was '{:?}'", value));
         }
 
         let value = stripped.unwrap().trim().to_string();
         let components: Vec<&str>  = value.splitn(2, ' ').collect();
 
         if components.len() != 2 {
-            return Err(anyhow::anyhow!("Start line missing method or path"));
+            return Err(anyhow!("Start line missing method or path"));
         }
 
         let verb = Verb::try_from(components[0])?;
@@ -151,6 +131,10 @@ fn read_stream(stream: &mut TcpStream) -> Result<Request> {
     Ok(Request(start_line, headers, body))
 }
 
+fn make_text_response(status_code: u16, message: &str, body: &str) -> String {
+    format!("HTTP/1.1 {status_code} {message}\r\nContent-Type: text/plain\r\nContent-Length: {0}\r\n\r\n{body}", body.len())
+}
+
 fn handle_request(stream: &mut TcpStream) -> Result<String> {
     let Request ( start_line, headers, body ) = read_stream(stream)?;
     let StartLine { verb, path } = start_line;
@@ -159,14 +143,14 @@ fn handle_request(stream: &mut TcpStream) -> Result<String> {
     let response = match (verb, path.as_str(), body) {
         (Verb::Get, p, _) if p.starts_with("/echo/") => {
             let to_echo = p.strip_prefix("/echo/").unwrap(); // We just tested above
-            format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {0}\r\n\r\n{to_echo}", to_echo.len())
+            make_text_response(200, "OK", to_echo)
         },
         (Verb::Post, p, Some(b)) if p.starts_with("/files/") => {
             let file_name = path.strip_prefix("/files/").unwrap();
             let file_path = opts.directory.clone().unwrap().join(file_name);
             let mut file = File::create(file_path)?;
             file.write_all(&b.0)?;
-            "HTTP/1.1 201 Created\r\n\r\n201 Created".to_string()
+            make_text_response(201, "Created", "")
         },
         (Verb::Get, p, _) if opts.directory.is_some() && p.starts_with("/files/")  => {
             let file_name = path.strip_prefix("/files/").unwrap();
@@ -176,15 +160,15 @@ fn handle_request(stream: &mut TcpStream) -> Result<String> {
                     let contents = std::fs::read_to_string(file_path)?;
                     format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {0}\r\n\r\n{1}", contents.len(), contents)
                 },
-                Err(_) => "HTTP/1.1 404 Not Found\r\n\r\n404 Not Found".to_string()
+                Err(_) => make_text_response(404, "Not Found", "")
             }
         },
         (Verb::Get, "/user-agent", _) => {
             let user_agent = headers.get("User-Agent").unwrap(); // TODO: Handle
-            format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {0}\r\n\r\n{1}", user_agent.len(), user_agent)
+            make_text_response(200, "OK", &user_agent)
         },
-        (Verb::Get, "/", _) => "HTTP/1.1 200 OK\r\n\r\n200 OK".to_string(),
-        _ => "HTTP/1.1 404 Not Found\r\n\r\n404 Not Found".to_string()
+        (Verb::Get, "/", _) => make_text_response(200, "OK", "body"),
+        _ => make_text_response(404, "Not Found", "")
     };
 
     Ok(response)
@@ -208,12 +192,10 @@ impl Args {
 fn main() -> Result<()> {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     println!("Logs from your program will appear here!");
-
     {
         let args = Args::parse();
         OPTS.set(args).unwrap();
     }
-
 
     // Uncomment this block to pass the first stage
     let listener = TcpListener::bind("127.0.0.1:4221")?;
