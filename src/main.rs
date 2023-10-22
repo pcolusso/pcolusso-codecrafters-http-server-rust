@@ -1,14 +1,11 @@
-use std::cell::RefCell;
 use std::fmt::Display;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::thread;
 use std::{net::TcpListener, io::Write};
 use std::net::TcpStream;
 use std::io::prelude::*;
-
 use anyhow::{anyhow, Result};
 
 enum Verb {
@@ -120,20 +117,21 @@ fn save_file(path: PathBuf, contents: &[u8]) -> Result<usize> {
     Ok(contents.len())
 }
 
-fn handle_request(mut stream: TcpStream, opts: Args) -> Result<()> {
-    let mut reader = BufReader::new(&mut stream);
-    let mut buf = String::with_capacity(50); 
-    reader.read_line(&mut buf)?;
+struct Body(Vec<u8>);
 
+struct Request(StartLine, Headers, Option<Body>);
+
+fn read_stream(stream: &mut TcpStream) -> Result<Request> {
+    let mut reader = BufReader::new(stream);
+    let mut buf = String::with_capacity(50); 
+
+    // Read the first line in
+    reader.read_line(&mut buf)?;
     let start_line = StartLine::try_from(buf.as_str())?;
     buf.clear();
 
-    let StartLine { path, verb } = start_line;
-
-    eprintln!("Handing {verb} to {:?}", path);
-
+    // Headers, loop until we don't get anymore.
     let mut headers = Headers(vec!());
-
     loop {
         let _ = reader.read_line(&mut buf)?;
         eprintln!("Reading Headers, line is {:?}", buf);
@@ -145,43 +143,59 @@ fn handle_request(mut stream: TcpStream, opts: Args) -> Result<()> {
         }
         buf.clear();
     }
-    // Ideally, a pattern match would be better here. But not too sure how to achieve that with partial strings
-    let response = if path.starts_with("/echo/") {
-        let to_echo = path.strip_prefix("/echo/").unwrap(); // We just tested above
-        format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {0}\r\n\r\n{to_echo}", to_echo.len())
-    } else if matches!(verb, Verb::Post) && opts.directory.is_some() && path.starts_with("/files/") {
-        let file_name = path.strip_prefix("/files/").unwrap();
-        let file_path = opts.directory.unwrap().join(file_name);
-        let mut file = File::create(file_path)?;
-        let content_length = headers.get("Content-Length").unwrap();
-        let size: usize = content_length.parse()?;
-        let mut body = vec![0; size];
-        reader.read_exact(&mut body)?;
-        file.write_all(&body)?;
-        "HTTP/1.1 201 Created\r\n\r\n201 Created".to_string()
-    } else if opts.directory.is_some() && path.starts_with("/files/") {
-        let file_name = path.strip_prefix("/files/").unwrap();
-        let file_path = opts.directory.unwrap().join(file_name);
-        match std::fs::metadata(&file_path) {
-            Ok(_) => {
-                let contents = std::fs::read_to_string(file_path)?;
-                format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {0}\r\n\r\n{1}", contents.len(), contents)
-            },
-            Err(_) => "HTTP/1.1 404 Not Found\r\n\r\n404 Not Found".to_string()
-        }
-    } else if path == "/user-agent" {
-        let user_agent = headers.get("User-Agent").unwrap();
-        format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {0}\r\n\r\n{1}", user_agent.len(), user_agent)
-    } else if path == "/" {
-        "HTTP/1.1 200 OK\r\n\r\n200 OK".to_string()
-    } else {
-        "HTTP/1.1 404 Not Found\r\n\r\n404 Not Found".to_string()
+
+    // If we have Content-Length, there's a body to load.
+    let body = match headers.get("Content-Length") {
+        Some(content_length) => {
+            let size: usize = content_length.parse()?;
+            let mut body = vec![0; size];
+            reader.read_exact(&mut body)?;
+            Some(Body(body))
+        },
+        None => None
     };
 
-    stream.write_all(response.as_bytes())?;
-    stream.flush()?;
-    
-    Ok(())
+    Ok(Request(start_line, headers, body))
+}
+
+fn handle_request(mut stream: &mut TcpStream, opts: Args) -> Result<String> {
+    let Request ( start_line, headers, body ) = read_stream(&mut stream)?;
+    let StartLine { verb, path } = start_line;
+
+    let response = match (verb, path.as_str(), body) {
+        (Verb::Get, p, _) if p.starts_with("/echo/") => {
+            let to_echo = p.strip_prefix("/echo/").unwrap(); // We just tested above
+            format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {0}\r\n\r\n{to_echo}", to_echo.len())
+        },
+        (Verb::Post, p, Some(b)) if p.starts_with("/files/") => {
+            let file_name = path.strip_prefix("/files/").unwrap();
+            let file_path = opts.directory.unwrap().join(file_name);
+            let mut file = File::create(file_path)?;
+            let content_length = headers.get("Content-Length").unwrap();
+            let size: usize = content_length.parse()?;
+            file.write_all(&b.0)?;
+            "HTTP/1.1 201 Created\r\n\r\n201 Created".to_string()
+        },
+        (Verb::Get, p, _) if opts.directory.is_some() && p.starts_with("/files/")  => {
+            let file_name = path.strip_prefix("/files/").unwrap();
+            let file_path = opts.directory.unwrap().join(file_name);
+            match std::fs::metadata(&file_path) {
+                Ok(_) => {
+                    let contents = std::fs::read_to_string(file_path)?;
+                    format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {0}\r\n\r\n{1}", contents.len(), contents)
+                },
+                Err(_) => "HTTP/1.1 404 Not Found\r\n\r\n404 Not Found".to_string()
+            }
+        },
+        (Verb::Get, "/user-agent", _) => {
+            let user_agent = headers.get("User-Agent").unwrap(); // TODO: Handle
+            format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {0}\r\n\r\n{1}", user_agent.len(), user_agent)
+        },
+        (Verb::Get, "/", _) => "HTTP/1.1 200 OK\r\n\r\n200 OK".to_string(),
+        _ => "HTTP/1.1 404 Not Found\r\n\r\n404 Not Found".to_string()
+    };
+
+    Ok(response)
 }
 
 #[derive(Clone)]
@@ -220,13 +234,19 @@ fn main() -> Result<()> {
 
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => {
+            Ok(mut stream) => {
                 let im_being_lazy = args.clone();
                 thread::spawn(move || {
-                    match handle_request(stream, im_being_lazy) {
-                        Ok(()) => { },
-                        Err(e) => { eprintln!("Issue processing connection, {0}", e); } 
+                    match handle_request(&mut stream, im_being_lazy) {
+                        Ok(response) => { 
+                            stream.write_all(response.as_bytes()).unwrap();
+                        },
+                        Err(e) => { 
+                            stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\n\r\n500 Internal Server Error");
+                            eprintln!("Issue processing connection, {0}", e);
+                        } 
                     }
+                    stream.flush().unwrap();
                 });
             }
             Err(e) => {
